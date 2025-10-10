@@ -1,5 +1,4 @@
 import express, { Router, type Application } from 'express';
-import 'express-async-errors';
 import http from 'http';
 import { problemDetailsMiddleware } from './middlewares/problemDetailsMiddleware';
 import type { ErrorToProblemDetailsMapping } from './responses';
