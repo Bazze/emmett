@@ -8,6 +8,7 @@ import { assertDeepEqual, assertIsNotNull } from '@event-driven-io/emmett';
 import { type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { after, before, describe, it } from 'node:test';
 import { createEventStoreSchema, defaultTag } from '.';
+import { PostgreSQLEventStoreCheckpoint } from './readMessagesBatch';
 import { readProcessorCheckpoint } from './readProcessorCheckpoint';
 import { storeProcessorCheckpoint } from './storeProcessorCheckpoint';
 import { getPostgreSQLStartedContainer } from '@event-driven-io/emmett-testcontainers';
@@ -17,9 +18,64 @@ void describe('storeProcessorCheckpoint and readProcessorCheckpoint tests', () =
   let connectionString: string;
   let pool: Dumbo;
 
-  const checkpoint1 = 100n;
-  const checkpoint2 = 200n;
-  const checkpoint3 = 300n;
+  // No messages are appended here, so there is no transaction id to resolve and 0
+  // stands in for it.
+  const checkpointOf = (globalPosition: bigint, transactionId = 0n): string =>
+    PostgreSQLEventStoreCheckpoint.toProcessorCheckpoint({
+      transactionId,
+      globalPosition,
+    });
+
+  // What a 0.42 node stores: a bare, normalized global position.
+  const legacyCheckpointOf = (globalPosition: bigint): string =>
+    globalPosition.toString().padStart(19, '0');
+
+  const position1 = 100n;
+  const position2 = 200n;
+  const position3 = 300n;
+
+  const checkpoint1 = checkpointOf(position1);
+  const checkpoint2 = checkpointOf(position2);
+  const checkpoint3 = checkpointOf(position3);
+
+  // Writes a message at an exact global position and hands back its transaction id, so a
+  // legacy checkpoint has something to resolve against.
+  const appendMessage = async (globalPosition: bigint): Promise<bigint> => {
+    const result = await pool.execute.query<{ transaction_id: string }>(
+      sql(
+        `INSERT INTO emt_messages (
+            stream_id, stream_position, global_position, transaction_id, partition,
+            message_schema_version, message_id, message_type, message_data, message_metadata)
+          VALUES (%L, 1, %s, pg_current_xact_id(), %L, '1', %L, 'TestEvent', '{}'::jsonb, '{}'::jsonb)
+          RETURNING transaction_id`,
+        `stream-${globalPosition}`,
+        globalPosition,
+        defaultTag,
+        `message-${globalPosition}`,
+      ),
+    );
+
+    return BigInt(result.rows[0]!.transaction_id);
+  };
+
+  const storeLegacyCheckpoint = (processorId: string, globalPosition: bigint) =>
+    pool.execute.command(
+      sql(
+        `INSERT INTO emt_processors (
+            processor_id,
+            version,
+            last_processed_checkpoint,
+            partition,
+            last_processed_transaction_id,
+            created_at,
+            last_updated
+          )
+          VALUES (%L, 1, %L, %L, pg_current_xact_id(), now(), now())`,
+        processorId,
+        legacyCheckpointOf(globalPosition),
+        defaultTag,
+      ),
+    );
 
   before(async () => {
     postgres = await getPostgreSQLStartedContainer();
@@ -181,9 +237,9 @@ void describe('storeProcessorCheckpoint and readProcessorCheckpoint tests', () =
     assertDeepEqual(result, { lastProcessedCheckpoint: checkpoint2 });
   });
 
-  void it('can read a composite checkpoint as a 0.42 global position', async () => {
+  void it('returns a stored composite checkpoint unchanged', async () => {
     const processorId = 'processor-read-composite';
-    const compositeCheckpoint = `00000000000000000123:${checkpoint2.toString().padStart(19, '0')}`;
+    const compositeCheckpoint = checkpointOf(position2, 123n);
 
     await pool.execute.command(
       sql(
@@ -207,30 +263,30 @@ void describe('storeProcessorCheckpoint and readProcessorCheckpoint tests', () =
       processorId,
     });
 
-    assertDeepEqual(result, { lastProcessedCheckpoint: checkpoint2 });
+    assertDeepEqual(result, { lastProcessedCheckpoint: compositeCheckpoint });
   });
 
-  void it('can update when the stored checkpoint is composite and caller uses 0.42 global positions', async () => {
-    const processorId = 'processor-update-composite-from-global';
-    const compositeCheckpoint = `00000000000000000123:${checkpoint1.toString().padStart(19, '0')}`;
+  // The upgrade path: the row a running 0.42 deployment left behind holds a bare global
+  // position, and the transaction id has to come from the message it points at.
+  void it('resolves the transaction id of a checkpoint stored as a bare global position', async () => {
+    const processorId = 'processor-read-legacy';
+    const transactionId = await appendMessage(position2);
 
-    await pool.execute.command(
-      sql(
-        `INSERT INTO emt_processors (
-            processor_id,
-            version,
-            last_processed_checkpoint,
-            partition,
-            last_processed_transaction_id,
-            created_at,
-            last_updated
-          )
-          VALUES (%L, 1, %L, %L, pg_current_xact_id(), now(), now())`,
-        processorId,
-        compositeCheckpoint,
-        defaultTag,
-      ),
-    );
+    await storeLegacyCheckpoint(processorId, position2);
+
+    const result = await readProcessorCheckpoint(pool.execute, {
+      processorId,
+    });
+
+    assertDeepEqual(result, {
+      lastProcessedCheckpoint: checkpointOf(position2, transactionId),
+    });
+  });
+
+  void it('can update when the stored checkpoint is a bare global position', async () => {
+    const processorId = 'processor-update-legacy-from-composite';
+
+    await storeLegacyCheckpoint(processorId, position1);
 
     const result = await storeProcessorCheckpoint(pool.execute, {
       processorId,
@@ -251,79 +307,52 @@ void describe('storeProcessorCheckpoint and readProcessorCheckpoint tests', () =
     assertDeepEqual(readResult, { lastProcessedCheckpoint: checkpoint2 });
   });
 
-  void it('supports mixed 0.42 and 0.43 checkpoint writes during rolling deployment', async () => {
+  // A rolling deployment runs unpatched 0.42 nodes, which write a bare global position,
+  // alongside patched ones writing the pair. Neither may lose the other's progress.
+  void it('supports mixed bare and composite checkpoint writes during rolling deployment', async () => {
     const processorId = 'processor-blue-green-checkpoint-sequence';
-    const checkpoint4 = 400n;
-    const normalizedCheckpoint1 = checkpoint1.toString().padStart(19, '0');
-    const normalizedCheckpoint2 = checkpoint2.toString().padStart(19, '0');
-    const normalizedCheckpoint3 = checkpoint3.toString().padStart(19, '0');
-    const normalizedCheckpoint4 = checkpoint4.toString().padStart(19, '0');
-    const compositeCheckpoint2 = `00000000000000000102:${normalizedCheckpoint2}`;
-    const compositeCheckpoint4 = `00000000000000000104:${normalizedCheckpoint4}`;
+    const position4 = 400n;
+    const checkpoint4 = checkpointOf(position4);
 
-    const initialStore = await storeProcessorCheckpoint(pool.execute, {
+    // An unpatched node starts the processor off with a bare position.
+    await storeLegacyCheckpoint(processorId, position1);
+
+    // A patched node picks it up and writes the pair over it.
+    const compositeWrite = await storeProcessorCheckpoint(pool.execute, {
       processorId,
-      lastProcessedCheckpoint: null,
-      newCheckpoint: checkpoint1,
+      lastProcessedCheckpoint: checkpoint1,
+      newCheckpoint: checkpoint2,
       version: 1,
     });
 
-    assertDeepEqual(initialStore, {
+    assertDeepEqual(compositeWrite, {
       success: true,
-      newCheckpoint: checkpoint1,
+      newCheckpoint: checkpoint2,
     });
 
-    // Simulate 0.43 node writing composite checkpoint over 0.42 plain checkpoint.
+    // An unpatched node reads the pair as a bigint and writes a bare position back.
     await pool.execute.command(
       sql(
         `SELECT store_processor_checkpoint(%L, 1, %L, %L, pg_current_xact_id(), %L, %L)`,
         processorId,
-        compositeCheckpoint2,
-        `00000000000000000101:${normalizedCheckpoint1}`,
+        legacyCheckpointOf(position3),
+        legacyCheckpointOf(position2),
         defaultTag,
         processorId,
       ),
     );
 
-    const afterCompositeWrite = await readProcessorCheckpoint(pool.execute, {
+    // The patched node continues from the bare position without losing its place.
+    const finalWrite = await storeProcessorCheckpoint(pool.execute, {
       processorId,
-    });
-
-    assertDeepEqual(afterCompositeWrite, {
-      lastProcessedCheckpoint: checkpoint2,
-    });
-
-    // Simulate 0.42 node reading composite as bigint and writing next plain checkpoint.
-    const plainWrite = await storeProcessorCheckpoint(pool.execute, {
-      processorId,
-      lastProcessedCheckpoint: checkpoint2,
-      newCheckpoint: checkpoint3,
+      lastProcessedCheckpoint: checkpoint3,
+      newCheckpoint: checkpoint4,
       version: 1,
     });
 
-    assertDeepEqual(plainWrite, {
+    assertDeepEqual(finalWrite, {
       success: true,
-      newCheckpoint: checkpoint3,
-    });
-
-    // Simulate 0.43 node continuing from the 0.42 plain checkpoint.
-    await pool.execute.command(
-      sql(
-        `SELECT store_processor_checkpoint(%L, 1, %L, %L, pg_current_xact_id(), %L, %L)`,
-        processorId,
-        compositeCheckpoint4,
-        `00000000000000000103:${normalizedCheckpoint3}`,
-        defaultTag,
-        processorId,
-      ),
-    );
-
-    const finalRead = await readProcessorCheckpoint(pool.execute, {
-      processorId,
-    });
-
-    assertDeepEqual(finalRead, {
-      lastProcessedCheckpoint: checkpoint4,
+      newCheckpoint: checkpoint4,
     });
 
     const rawCheckpoint = await pool.execute.query<{
@@ -340,7 +369,7 @@ void describe('storeProcessorCheckpoint and readProcessorCheckpoint tests', () =
 
     assertDeepEqual(
       rawCheckpoint.rows[0]?.last_processed_checkpoint,
-      compositeCheckpoint4,
+      checkpoint4,
     );
   });
 

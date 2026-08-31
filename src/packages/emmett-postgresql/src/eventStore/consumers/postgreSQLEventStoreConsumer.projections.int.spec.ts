@@ -1,3 +1,4 @@
+import { dumbo, type Dumbo } from '@event-driven-io/dumbo';
 import { assertDeepEqual, type ReadEvent } from '@event-driven-io/emmett';
 import {
   pongoClient,
@@ -17,6 +18,7 @@ import {
   type PostgresEventStore,
 } from '../postgreSQLEventStore';
 import { pongoSingleStreamProjection } from '../projections';
+import { checkpointForGlobalPosition } from '../schema';
 import { postgreSQLEventStoreConsumer } from './postgreSQLEventStoreConsumer';
 import type { PostgreSQLProjectorOptions } from './postgreSQLProcessor';
 import { getPostgreSQLStartedContainer } from '@event-driven-io/emmett-testcontainers';
@@ -26,6 +28,7 @@ const withDeadline = { timeout: 30000 };
 void describe('PostgreSQL event store started consumer', () => {
   let postgres: StartedPostgreSqlContainer;
   let connectionString: string;
+  let pool: Dumbo;
   let eventStore: PostgresEventStore;
   let pongo: PongoClient;
   let summaries: PongoCollection<ShoppingCartSummary>;
@@ -35,6 +38,7 @@ void describe('PostgreSQL event store started consumer', () => {
   before(async () => {
     postgres = await getPostgreSQLStartedContainer();
     connectionString = postgres.getConnectionUri();
+    pool = dumbo({ connectionString });
     eventStore = getPostgreSQLEventStore(connectionString);
     pongo = pongoClient(connectionString);
     summaries = pongo.db().collection(shoppingCartsSummaryCollectionName);
@@ -44,6 +48,7 @@ void describe('PostgreSQL event store started consumer', () => {
   after(async () => {
     try {
       await eventStore.close();
+      await pool.close();
       await pongo.close();
       await postgres.stop();
     } catch (error) {
@@ -187,7 +192,12 @@ void describe('PostgreSQL event store started consumer', () => {
         consumer.projector({
           processorId: uuid(),
           projection: shoppingCartsSummaryProjection,
-          startFrom: { lastCheckpoint: startPosition },
+          startFrom: {
+            lastCheckpoint: await checkpointForGlobalPosition(
+              pool.execute,
+              startPosition,
+            ),
+          },
           stopAfter: (event) =>
             event.metadata.globalPosition === stopAfterPosition,
         });

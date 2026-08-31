@@ -12,7 +12,10 @@ import {
   type PostgreSQLEventStoreConsumer,
   type PostgreSQLEventStoreConsumerOptions,
 } from './postgreSQLEventStoreConsumer';
-import type { PostgreSQLProcessorHandlerContext } from './postgreSQLProcessor';
+import type {
+  PostgreSQLProcessorCheckpoint,
+  PostgreSQLProcessorHandlerContext,
+} from './postgreSQLProcessor';
 
 const defaultRebuildLockPolicy: LockAcquisitionPolicy = {
   type: 'retry',
@@ -39,7 +42,8 @@ export const rebuildPostgreSQLProjections = <
             | ProjectorOptions<
                 EventType,
                 ReadEventMetadataWithGlobalPosition,
-                PostgreSQLProcessorHandlerContext
+                PostgreSQLProcessorHandlerContext,
+                PostgreSQLProcessorCheckpoint
               >
             | PostgreSQLProjectionDefinition<EventType>
           )[];
@@ -47,7 +51,8 @@ export const rebuildPostgreSQLProjections = <
       | ProjectorOptions<
           EventType,
           ReadEventMetadataWithGlobalPosition,
-          PostgreSQLProcessorHandlerContext
+          PostgreSQLProcessorHandlerContext,
+          PostgreSQLProcessorCheckpoint
         >
     ),
 ): PostgreSQLEventStoreConsumer<EventType> => {
@@ -62,7 +67,8 @@ export const rebuildPostgreSQLProjections = <
     ProjectorOptions<
       EventType,
       ReadEventMetadataWithGlobalPosition,
-      PostgreSQLProcessorHandlerContext
+      PostgreSQLProcessorHandlerContext,
+      PostgreSQLProcessorCheckpoint
     >,
     'processorId'
   > & { processorId?: string })[] =

@@ -1,3 +1,4 @@
+import { dumbo, type Dumbo } from '@event-driven-io/dumbo';
 import {
   assertMatches,
   getInMemoryDatabase,
@@ -17,6 +18,7 @@ import {
   getPostgreSQLEventStore,
   type PostgresEventStore,
 } from '../postgreSQLEventStore';
+import { checkpointForGlobalPosition } from '../schema';
 import { postgreSQLEventStoreConsumer } from './postgreSQLEventStoreConsumer';
 import { getPostgreSQLStartedContainer } from '@event-driven-io/emmett-testcontainers';
 
@@ -25,6 +27,7 @@ const withDeadline = { timeout: 30000 };
 void describe('PostgreSQL event store started consumer', () => {
   let postgres: StartedPostgreSqlContainer;
   let connectionString: string;
+  let pool: Dumbo;
   let eventStore: PostgresEventStore;
   let summaries: InMemoryDocumentsCollection<ShoppingCartSummary>;
   const productItem = { price: 10, productId: uuid(), quantity: 10 };
@@ -34,6 +37,7 @@ void describe('PostgreSQL event store started consumer', () => {
   before(async () => {
     postgres = await getPostgreSQLStartedContainer();
     connectionString = postgres.getConnectionUri();
+    pool = dumbo({ connectionString });
     eventStore = getPostgreSQLEventStore(connectionString);
     summaries = database.collection(shoppingCartsSummaryCollectionName);
     await eventStore.schema.migrate();
@@ -42,6 +46,7 @@ void describe('PostgreSQL event store started consumer', () => {
   after(async () => {
     try {
       await eventStore.close();
+      await pool.close();
       await postgres.stop();
     } catch (error) {
       console.log(error);
@@ -191,7 +196,16 @@ void describe('PostgreSQL event store started consumer', () => {
           processorId: uuid(),
           projection: shoppingCartsSummaryProjection,
           connectionOptions: { database },
-          startFrom: { lastCheckpoint: startPosition },
+          startFrom: {
+            // An in-memory processor fed by a PostgreSQL consumer sees PostgreSQL
+            // checkpoints. It only ever compares them, and the padded pair compares as
+            // text exactly as it does as a pair, so the mismatch is confined to the
+            // declared type: InMemoryProjectorOptions still says bigint.
+            lastCheckpoint: (await checkpointForGlobalPosition(
+              pool.execute,
+              startPosition,
+            )) as unknown as bigint,
+          },
           stopAfter: (event) =>
             event.metadata.globalPosition === stopAfterPosition,
         });

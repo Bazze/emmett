@@ -60,11 +60,16 @@ export type PostgreSQLProcessorHandlerContext = {
   // TODO: Reconsider if it should be for all processors
   EventStoreSchemaMigrationOptions;
 
+// Serialized 'transactionId:globalPosition' pair, opaque to the core processor, which
+// only ever compares checkpoints. See readMessagesBatch for why the pair is needed.
+export type PostgreSQLProcessorCheckpoint = string;
+
 export type PostgreSQLProcessor<MessageType extends Message = AnyMessage> =
   MessageProcessor<
     MessageType,
     ReadEventMetadataWithGlobalPosition,
-    PostgreSQLProcessorHandlerContext
+    PostgreSQLProcessorHandlerContext,
+    PostgreSQLProcessorCheckpoint
   >;
 
 export type PostgreSQLProcessorEachMessageHandler<
@@ -150,7 +155,8 @@ export type PostgreSQLCheckpointer<
 > = Checkpointer<
   MessageType,
   ReadEventMetadataWithGlobalPosition,
-  PostgreSQLProcessorHandlerContext
+  PostgreSQLProcessorHandlerContext,
+  PostgreSQLProcessorCheckpoint
 >;
 
 export const postgreSQLCheckpointer = <
@@ -162,7 +168,10 @@ export const postgreSQLCheckpointer = <
     return { lastCheckpoint: result?.lastProcessedCheckpoint };
   },
   store: async (options, context) => {
-    const newPosition: bigint | null = getCheckpoint(options.message);
+    // The message metadata carries the serialized 'transactionId:globalPosition' pair.
+    const newPosition: PostgreSQLProcessorCheckpoint | null = getCheckpoint(
+      options.message,
+    );
 
     const result = await storeProcessorCheckpoint(context.execute, {
       lastProcessedCheckpoint: options.lastCheckpoint,
@@ -193,7 +202,8 @@ export type PostgreSQLReactorOptions<MessageType extends Message = Message> =
   ReactorOptions<
     MessageType,
     ReadEventMetadataWithGlobalPosition,
-    PostgreSQLProcessorHandlerContext
+    PostgreSQLProcessorHandlerContext,
+    PostgreSQLProcessorCheckpoint
   > &
     PostgreSQLProcessorOptionsBase;
 
@@ -201,7 +211,8 @@ export type PostgreSQLProjectorOptions<EventType extends AnyEvent = AnyEvent> =
   ProjectorOptions<
     EventType,
     ReadEventMetadataWithGlobalPosition,
-    PostgreSQLProcessorHandlerContext
+    PostgreSQLProcessorHandlerContext,
+    PostgreSQLProcessorCheckpoint
   > &
     PostgreSQLProcessorOptionsBase &
     EventStoreSchemaMigrationOptions;
@@ -389,7 +400,8 @@ export const postgreSQLProjector = <EventType extends Event = Event>(
   const processor = projector<
     EventType,
     ReadEventMetadataWithGlobalPosition,
-    PostgreSQLProcessorHandlerContext
+    PostgreSQLProcessorHandlerContext,
+    PostgreSQLProcessorCheckpoint
   >({
     ...options,
     processorId,
@@ -447,7 +459,12 @@ export const postgreSQLReactor = <MessageType extends Message = Message>(
       processorLock,
     );
 
-  return reactor({
+  return reactor<
+    MessageType,
+    ReadEventMetadataWithGlobalPosition,
+    PostgreSQLProcessorHandlerContext,
+    PostgreSQLProcessorCheckpoint
+  >({
     ...options,
     processorId,
     processorInstanceId,

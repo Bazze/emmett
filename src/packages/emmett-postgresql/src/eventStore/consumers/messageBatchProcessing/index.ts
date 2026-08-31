@@ -7,6 +7,7 @@ import type {
 } from '@event-driven-io/emmett';
 import { readLastMessageGlobalPosition } from '../../schema/readLastMessageGlobalPosition';
 import {
+  PostgreSQLEventStoreCheckpoint,
   readMessagesBatch,
   type ReadMessagesBatchOptions,
 } from '../../schema/readMessagesBatch';
@@ -37,7 +38,7 @@ export type PostgreSQLEventStoreMessageBatchPullerOptions<
 };
 
 export type PostgreSQLEventStoreMessageBatchPullerStartFrom =
-  | { lastCheckpoint: bigint }
+  | { lastCheckpoint: string }
   | 'BEGINNING'
   | 'END';
 
@@ -72,13 +73,19 @@ export const postgreSQLEventStoreMessageBatchPuller = <
     options: PostgreSQLEventStoreMessageBatchPullerStartOptions,
   ) => {
     try {
-      const after =
+      // END has to capture the transaction id along with the position: resuming from a
+      // bare maximum position would leave a lower-positioned, later-committing message
+      // permanently below the cursor.
+      const after: PostgreSQLEventStoreCheckpoint =
         options.startFrom === 'BEGINNING'
-          ? 0n
+          ? PostgreSQLEventStoreCheckpoint.default
           : options.startFrom === 'END'
             ? ((await readLastMessageGlobalPosition(executor))
-                .currentGlobalPosition ?? 0n)
-            : options.startFrom.lastCheckpoint;
+                .currentGlobalPosition ??
+              PostgreSQLEventStoreCheckpoint.default)
+            : PostgreSQLEventStoreCheckpoint.parse(
+                options.startFrom.lastCheckpoint,
+              );
 
       const readMessagesOptions: ReadMessagesBatchOptions = {
         after,
@@ -88,7 +95,7 @@ export const postgreSQLEventStoreMessageBatchPuller = <
       let waitTime = 100;
 
       while (isRunning && !signal?.aborted) {
-        const { messages, currentGlobalPosition, areMessagesLeft } =
+        const { messages, currentCheckpoint, areMessagesLeft } =
           await readMessagesBatch<MessageType>(executor, readMessagesOptions);
 
         if (messages.length > 0) {
@@ -100,13 +107,13 @@ export const postgreSQLEventStoreMessageBatchPuller = <
           }
         }
 
-        readMessagesOptions.after = currentGlobalPosition;
+        readMessagesOptions.after = currentCheckpoint;
 
         await new Promise((resolve) => setTimeout(resolve, waitTime));
 
         if (stopWhen?.noMessagesLeft === true && !areMessagesLeft) {
           console.log(
-            `No messages left to process after reaching global position ${currentGlobalPosition}. Stopping the puller.`,
+            `No messages left to process after reaching checkpoint ${PostgreSQLEventStoreCheckpoint.toProcessorCheckpoint(currentCheckpoint)}. Stopping the puller.`,
           );
           isRunning = false;
           break;

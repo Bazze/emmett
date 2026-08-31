@@ -15,7 +15,11 @@ import {
   type PostgresEventStore,
 } from '../postgreSQLEventStore';
 import { postgreSQLProcessorLock } from '../projections';
-import { storeProcessorCheckpoint } from '../schema';
+import {
+  checkpointForGlobalPosition,
+  PostgreSQLEventStoreCheckpoint,
+  storeProcessorCheckpoint,
+} from '../schema';
 import { postgreSQLEventStoreConsumer } from './postgreSQLEventStoreConsumer';
 import type { PostgreSQLReactorOptions } from './postgreSQLProcessor';
 
@@ -172,7 +176,12 @@ void describe('PostgreSQL event store started consumer', () => {
         });
         consumer.reactor<GuestStayEvent>({
           processorId: uuid(),
-          startFrom: { lastCheckpoint: startPosition },
+          startFrom: {
+            lastCheckpoint: await checkpointForGlobalPosition(
+              pool.execute,
+              startPosition,
+            ),
+          },
           stopAfter: (event) =>
             event.metadata.globalPosition === stopAfterPosition,
           eachMessage: (event) => {
@@ -514,8 +523,14 @@ void describe('PostgreSQL event store started consumer', () => {
         await storeProcessorCheckpoint(pool.execute, {
           processorId,
           version: 1,
-          newCheckpoint: firstPosition,
-          lastProcessedCheckpoint: 0n,
+          newCheckpoint: await checkpointForGlobalPosition(
+            pool.execute,
+            firstPosition,
+          ),
+          lastProcessedCheckpoint:
+            PostgreSQLEventStoreCheckpoint.toProcessorCheckpoint(
+              PostgreSQLEventStoreCheckpoint.default,
+            ),
           partition: defaultTag,
           processorInstanceId: 'crashed-instance',
         });
@@ -766,8 +781,14 @@ void describe('PostgreSQL event store started consumer', () => {
         await storeProcessorCheckpoint(pool.execute, {
           processorId,
           version: 1,
-          newCheckpoint: firstPosition,
-          lastProcessedCheckpoint: 0n,
+          newCheckpoint: await checkpointForGlobalPosition(
+            pool.execute,
+            firstPosition,
+          ),
+          lastProcessedCheckpoint:
+            PostgreSQLEventStoreCheckpoint.toProcessorCheckpoint(
+              PostgreSQLEventStoreCheckpoint.default,
+            ),
           partition: defaultTag,
           processorInstanceId: 'crashed-instance',
         });
