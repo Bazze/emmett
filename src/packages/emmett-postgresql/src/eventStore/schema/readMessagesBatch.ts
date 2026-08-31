@@ -78,6 +78,8 @@ export const PostgreSQLEventStoreCheckpoint = {
   default: defaultPostgreSQLEventStoreCheckpoint,
   toProcessorCheckpoint,
   parse: parseCheckpoint,
+  // Both halves are zero padded, so text order is pair order.
+  compare: (a: string, b: string): number => (a > b ? 1 : a < b ? -1 : 0),
 };
 
 export type ReadMessagesBatchOptions =

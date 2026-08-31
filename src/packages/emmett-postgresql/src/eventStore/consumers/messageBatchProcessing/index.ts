@@ -153,18 +153,39 @@ export const postgreSQLEventStoreMessageBatchPuller = <
   };
 };
 
+// Orders start positions, BEGINNING first and END last, as 0.43's
+// CurrentMessageProcessorPosition.compare does.
+const compareStartFrom = (
+  a: PostgreSQLEventStoreMessageBatchPullerStartFrom,
+  b: PostgreSQLEventStoreMessageBatchPullerStartFrom,
+): number => {
+  if (a === b) return 0;
+
+  if (a === 'BEGINNING') return -1;
+  if (b === 'BEGINNING') return 1;
+
+  if (a === 'END') return 1;
+  if (b === 'END') return -1;
+
+  return PostgreSQLEventStoreCheckpoint.compare(
+    a.lastCheckpoint,
+    b.lastCheckpoint,
+  );
+};
+
+// One puller feeds every processor, so it has to start from the earliest position any of
+// them holds; a processor that gets nothing before the shared cursor never sees those
+// messages and checkpoints past them. Taking the minimum of that ordering covers what
+// used to be three separate branches, and fixes the last of them: it sorted the position
+// objects rather than the checkpoints inside them, and `{} > {}` stringifies both to
+// '[object Object]', so the comparator was constant and the pick arbitrary.
 export const zipPostgreSQLEventStoreMessageBatchPullerStartFrom = (
   options: (PostgreSQLEventStoreMessageBatchPullerStartFrom | undefined)[],
 ): PostgreSQLEventStoreMessageBatchPullerStartFrom => {
-  if (
-    options.length === 0 ||
-    options.some((o) => o === undefined || o === 'BEGINNING')
-  )
-    return 'BEGINNING';
+  if (options.length === 0) return 'BEGINNING';
 
-  if (options.every((o) => o === 'END')) return 'END';
-
-  return options
-    .filter((o) => o !== undefined && o !== 'BEGINNING' && o !== 'END')
-    .sort((a, b) => (a > b ? 1 : -1))[0]!;
+  return (
+    options.map((o) => o ?? 'BEGINNING').sort(compareStartFrom)[0] ??
+    'BEGINNING'
+  );
 };
