@@ -1,6 +1,7 @@
 import { mapRows, sql, type SQLExecutor } from '@event-driven-io/dumbo';
 import {
   bigInt,
+  EmmettError,
   type CombinedMessageMetadata,
   type Message,
   type MessageDataOf,
@@ -36,50 +37,54 @@ export type PostgreSQLEventStoreCheckpoint = {
   globalPosition: bigint;
 };
 
-export const defaultPostgreSQLEventStoreCheckpoint: PostgreSQLEventStoreCheckpoint =
-  {
-    transactionId: 0n,
-    globalPosition: 0n,
-  };
+// The serialized form of the pair, opaque to the core processor, which only ever
+// compares checkpoints.
+export type PostgreSQLProcessorCheckpoint = string;
 
-// Both halves are zero padded so that comparing the serialized form as text orders it
-// exactly like the pair does. Checkpoints are compared as text in
-// store_processor_checkpoint and by the core processor's wasMessageHandled.
-// Same layout as 0.43.x, so the two versions can read each other's checkpoints.
+const defaultPostgreSQLEventStoreCheckpoint: PostgreSQLEventStoreCheckpoint = {
+  transactionId: 0n,
+  globalPosition: 0n,
+};
+
+// Both halves are zero padded so that text order is pair order, which
+// store_processor_checkpoint, wasMessageHandled and compare all rely on. Same layout as
+// 0.43.x, so the two versions can read each other's checkpoints.
 const toProcessorCheckpoint = (
   checkpoint: PostgreSQLEventStoreCheckpoint,
-): string =>
+): PostgreSQLProcessorCheckpoint =>
   `${checkpoint.transactionId.toString().padStart(20, '0')}:${bigInt.toNormalizedString(checkpoint.globalPosition)}`;
 
 const parseCheckpoint = (
-  checkpoint: string | bigint | undefined | null,
+  checkpoint: PostgreSQLProcessorCheckpoint | undefined | null,
 ): PostgreSQLEventStoreCheckpoint => {
   if (checkpoint === undefined || checkpoint === null)
     return defaultPostgreSQLEventStoreCheckpoint;
 
-  if (typeof checkpoint === 'bigint')
-    return { transactionId: 0n, globalPosition: checkpoint };
-
   const separatorIndex = checkpoint.indexOf(':');
 
-  // A checkpoint without a transaction id was written before this fix. Resolving the
-  // transaction id it belongs to needs a query, so readProcessorCheckpoint does it;
-  // reaching here means someone passed a bare position in, and starting at transaction
-  // id 0 replays rather than skips.
-  return separatorIndex === -1
-    ? { transactionId: 0n, globalPosition: BigInt(checkpoint) }
-    : {
-        transactionId: BigInt(checkpoint.slice(0, separatorIndex)),
-        globalPosition: BigInt(checkpoint.slice(separatorIndex + 1)),
-      };
+  // Fail loudly rather than default the transaction id to 0: that would compare below
+  // every real row and silently replay the whole partition. readProcessorCheckpoint
+  // resolves stored 0.42 positions, so reaching here means a bare position was passed in
+  // by hand.
+  if (separatorIndex === -1)
+    throw new EmmettError(
+      `'${checkpoint}' is a global position, not a checkpoint. Checkpoints carry the transaction id too; resume from the value readProcessorCheckpoint returns.`,
+    );
+
+  return {
+    transactionId: BigInt(checkpoint.slice(0, separatorIndex)),
+    globalPosition: BigInt(checkpoint.slice(separatorIndex + 1)),
+  };
 };
 
 export const PostgreSQLEventStoreCheckpoint = {
   default: defaultPostgreSQLEventStoreCheckpoint,
   toProcessorCheckpoint,
   parse: parseCheckpoint,
-  // Both halves are zero padded, so text order is pair order.
-  compare: (a: string, b: string): number => (a > b ? 1 : a < b ? -1 : 0),
+  compare: (
+    a: PostgreSQLProcessorCheckpoint,
+    b: PostgreSQLProcessorCheckpoint,
+  ): number => (a > b ? 1 : a < b ? -1 : 0),
 };
 
 export type ReadMessagesBatchOptions =
@@ -124,11 +129,12 @@ export const readMessagesBatch = async <
       ? options.batchSize
       : options.to.globalPosition - options.from.globalPosition;
 
-  // Quoted, as 0.43 renders it through dumbo's SQL tag. The quotes are load bearing:
-  // an unknown literal resolves to the column's type, whereas a bare numeric literal is
-  // typed integer, which has no comparison operator against xid8.
+  // %L quotes both values, which is load bearing rather than cosmetic: an unknown
+  // literal resolves to the column's type, whereas a bare numeric literal is typed
+  // integer, which has no comparison operator against xid8. Renders the same text 0.43
+  // gets from dumbo's SQL tag.
   const checkpointTuple = (checkpoint: PostgreSQLEventStoreCheckpoint) =>
-    `('${checkpoint.transactionId}', '${checkpoint.globalPosition}')`;
+    sql('(%L, %L)', checkpoint.transactionId, checkpoint.globalPosition);
 
   const fromCondition: string =
     from !== undefined
@@ -172,11 +178,10 @@ export const readMessagesBatch = async <
           globalPosition: BigInt(row.global_position),
         };
 
-        // getCheckpoint prefers metadata.checkpoint over globalPosition, so this is what
-        // carries the transaction id through the core processor. The core's 0.42 metadata
-        // type predates the field.
+        // getCheckpoint prefers metadata.checkpoint over globalPosition; the core's
+        // 0.42 metadata type predates the field.
         const metadata: RecordedMessageMetadataWithGlobalPosition & {
-          checkpoint: string;
+          checkpoint: PostgreSQLProcessorCheckpoint;
         } = {
           ...('metadata' in rawEvent ? (rawEvent.metadata ?? {}) : {}),
           messageId: row.message_id,

@@ -12,10 +12,8 @@ import {
   type PostgreSQLEventStoreConsumer,
   type PostgreSQLEventStoreConsumerOptions,
 } from './postgreSQLEventStoreConsumer';
-import type {
-  PostgreSQLProcessorCheckpoint,
-  PostgreSQLProcessorHandlerContext,
-} from './postgreSQLProcessor';
+import type { PostgreSQLProcessorCheckpoint } from '../schema';
+import type { PostgreSQLProcessorHandlerContext } from './postgreSQLProcessor';
 
 const defaultRebuildLockPolicy: LockAcquisitionPolicy = {
   type: 'retry',

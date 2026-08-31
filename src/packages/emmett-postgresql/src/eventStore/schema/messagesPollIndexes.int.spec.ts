@@ -64,19 +64,30 @@ void describe('emt_messages consumer poll indexes', () => {
     return result.rows[0]?.index_name ?? null;
   };
 
-  // Mirrors the poll in readMessagesBatch. This version filters on global_position
-  // directly, which is what makes the single-column index reachable.
-  const explainPoll = async (from: number): Promise<string> => {
+  // Mirrors the poll in readMessagesBatch: a row comparison on the same pair the query
+  // orders by.
+  const explainPoll = async (
+    transactionId: number,
+    from: number,
+  ): Promise<string> => {
     const result = await pool.execute.query<{ 'QUERY PLAN': string }>(
       SQL`EXPLAIN SELECT stream_id, stream_position, global_position
           FROM emt_messages
           WHERE partition = ${defaultTag} AND is_archived = FALSE
             AND transaction_id < pg_snapshot_xmin(pg_current_snapshot())
-            AND global_position >= ${from}
+            AND (transaction_id, global_position) > (${String(transactionId)}, ${String(from)})
           ORDER BY transaction_id, global_position
           LIMIT 100`,
     );
     return result.rows.map((row) => row['QUERY PLAN']).join('\n');
+  };
+
+  const maxTransactionId = async (): Promise<number> => {
+    const result = await pool.execute.query<{ transaction_id: string }>(
+      SQL`SELECT transaction_id FROM emt_messages
+          ORDER BY transaction_id DESC LIMIT 1`,
+    );
+    return Number(result.rows[0]!.transaction_id);
   };
 
   void it('creates both poll indexes on the default active partition', async () => {
@@ -103,26 +114,38 @@ void describe('emt_messages consumer poll indexes', () => {
   });
 
   void it('does not scan the whole partition at any cursor position', async () => {
-    for (const from of [total + 1, total - 100, total / 2, 0]) {
-      const plan = await explainPoll(from);
+    const maxTxId = await maxTransactionId();
+
+    for (const [txId, from] of [
+      [maxTxId, total + 1],
+      [maxTxId, total - 100],
+      [maxTxId / 2, total / 2],
+      [0, 0],
+    ]) {
+      const plan = await explainPoll(txId!, from!);
       assertTrue(!new RegExp(`Seq Scan on ${defaultActiveLeaf}\\b`).test(plan));
     }
   });
 
-  // Each index covers a case the other does not, which is why this version ships both.
-  // The composite alone leaves the caught-up poll walking from the low end of the
-  // index; the single column alone cannot satisfy the ORDER BY, so a deep backlog
-  // sorts everything past the cursor.
-  void it('uses the single-column index when caught up', async () => {
-    const plan = await explainPoll(total + 1);
+  // The row comparison seeks directly into the composite, so it now serves the poll at
+  // every cursor position - the caught-up case included, which is what the single-column
+  // index used to be needed for. That index stays for readProcessorCheckpoint's
+  // global_position lookup, and 0.43.0 drops it.
+  void it('uses the composite index when caught up', async () => {
+    const plan = await explainPoll(await maxTransactionId(), total + 1);
 
     assertTrue(
-      plan.includes((await indexNameOn(defaultActiveLeaf, 'global_position'))!),
+      plan.includes(
+        (await indexNameOn(
+          defaultActiveLeaf,
+          'transaction_id, global_position',
+        ))!,
+      ),
     );
   });
 
   void it('uses the composite index when replaying from the beginning', async () => {
-    const plan = await explainPoll(0);
+    const plan = await explainPoll(0, 0);
 
     assertTrue(
       plan.includes(

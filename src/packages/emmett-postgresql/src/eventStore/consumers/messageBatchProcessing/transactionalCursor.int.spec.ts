@@ -10,6 +10,7 @@ import { getPostgreSQLStartedContainer } from '@event-driven-io/emmett-testconta
 import { type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { after, afterEach, before, describe, it } from 'node:test';
 import { createEventStoreSchema, defaultTag } from '../../schema';
+import { truncateTables } from '../../schema/truncateTables';
 import { postgreSQLEventStoreMessageBatchPuller } from '.';
 
 // global_position comes from a sequence taken at INSERT time, transaction_id from
@@ -36,6 +37,8 @@ const insertMessage = (execute: SQLExecutor, messageId: string) =>
 // order xids are handed out independently of the order rows are inserted.
 const assignTransactionId = (execute: SQLExecutor) =>
   execute.query(SQL`SELECT pg_current_xact_id()`);
+
+const withDeadline = { timeout: 30000 };
 
 const waitUntil = async (
   condition: () => boolean,
@@ -92,7 +95,7 @@ void describe('PostgreSQL message batch puller transactional cursor', () => {
 
   afterEach(async () => {
     await closeSessions();
-    await pool.execute.command(SQL`DELETE FROM emt_messages`);
+    await truncateTables(pool.execute);
   });
 
   const startPuller = (received: string[]) => {
@@ -127,84 +130,100 @@ void describe('PostgreSQL message batch puller transactional cursor', () => {
     return result.rows[0]!;
   };
 
-  void it('reads a message that committed late even though it holds a lower global position', async () => {
-    // 'B' takes its xid first, 'A' second, so A ends up with the higher transaction_id...
-    const transactionB = await openTransaction();
-    await assignTransactionId(transactionB.execute);
+  void it(
+    'reads a message that committed late even though it holds a lower global position',
+    withDeadline,
+    async () => {
+      // 'B' takes its xid first, 'A' second, so A ends up with the higher transaction_id...
+      const transactionB = await openTransaction();
+      await assignTransactionId(transactionB.execute);
 
-    const transactionA = await openTransaction();
-    await assignTransactionId(transactionA.execute);
+      const transactionA = await openTransaction();
+      await assignTransactionId(transactionA.execute);
 
-    // ...while A inserts first, so A ends up with the lower global_position.
-    await insertMessage(transactionA.execute, 'A');
-    await insertMessage(transactionB.execute, 'B');
+      // ...while A inserts first, so A ends up with the lower global_position.
+      await insertMessage(transactionA.execute, 'A');
+      await insertMessage(transactionB.execute, 'B');
 
-    await transactionB.commit();
+      await transactionB.commit();
 
-    const rowA = await readRow(transactionA.execute, 'A');
-    const rowB = await readRow(pool.execute, 'B');
-    assertTrue(
-      BigInt(rowA.global_position) < BigInt(rowB.global_position),
-      'A should hold the lower global position',
-    );
-    assertTrue(
-      BigInt(rowA.transaction_id) > BigInt(rowB.transaction_id),
-      'A should hold the higher transaction id',
-    );
+      const rowA = await readRow(transactionA.execute, 'A');
+      const rowB = await readRow(pool.execute, 'B');
+      assertTrue(
+        BigInt(rowA.global_position) < BigInt(rowB.global_position),
+        'A should hold the lower global position',
+      );
+      assertTrue(
+        BigInt(rowA.transaction_id) > BigInt(rowB.transaction_id),
+        'A should hold the higher transaction id',
+      );
 
-    const received: string[] = [];
-    const stop = startPuller(received);
+      const received: string[] = [];
+      const stop = startPuller(received);
 
-    try {
-      // Only B is visible while A is still in flight, so the cursor advances past
-      // A's global position.
-      await waitUntil(() => received.includes('B'), {
-        timeoutMs: 5000,
-        message: 'B should be read while A is still uncommitted',
-      });
-      assertEqual(1, received.length);
+      try {
+        // Only B is visible while A is still in flight, so the cursor advances past
+        // A's global position.
+        await waitUntil(() => received.includes('B'), {
+          timeoutMs: 5000,
+          message: 'B should be read while A is still uncommitted',
+        });
+        assertEqual(1, received.length);
 
-      await transactionA.commit();
+        await transactionA.commit();
 
-      await waitUntil(() => received.includes('A'), {
-        timeoutMs: 5000,
-        message:
-          'A should still be read after it commits, even though its global position sits below the cursor',
-      });
-    } finally {
-      await stop();
-    }
-  });
+        await waitUntil(() => received.includes('A'), {
+          timeoutMs: 5000,
+          message:
+            'A should still be read after it commits, even though its global position sits below the cursor',
+        });
+      } finally {
+        await stop();
+      }
+    },
+  );
 
-  void it('does not read past an in-flight transaction', async () => {
-    // 'A' takes its xid first, so xmin sits at A for as long as A runs.
-    const transactionA = await openTransaction();
-    await assignTransactionId(transactionA.execute);
-    await insertMessage(transactionA.execute, 'A');
+  void it(
+    'does not read past an in-flight transaction',
+    withDeadline,
+    async () => {
+      // 'S' is committed before anything else opens, so it is the control: once the puller
+      // delivers it we know a poll has actually run, and 'nothing else arrived' means
+      // something.
+      await insertMessage(pool.execute, 'S');
 
-    // 'C' commits on its own connection with a higher transaction id.
-    await insertMessage(pool.execute, 'C');
+      // 'A' takes its xid first, so xmin sits at A for as long as A runs.
+      const transactionA = await openTransaction();
+      await assignTransactionId(transactionA.execute);
+      await insertMessage(transactionA.execute, 'A');
 
-    const received: string[] = [];
-    const stop = startPuller(received);
+      // 'C' commits on its own connection with a higher transaction id.
+      await insertMessage(pool.execute, 'C');
 
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      const received: string[] = [];
+      const stop = startPuller(received);
 
-      // C is committed but sits at or above xmin, so reading it would let the cursor
-      // skip A. The guard must keep both out.
-      assertEqual(0, received.length);
+      try {
+        await waitUntil(() => received.includes('S'), {
+          timeoutMs: 5000,
+          message: 'the puller should have polled at least once',
+        });
 
-      await transactionA.commit();
+        // C is committed but sits at or above xmin, so reading it would let the cursor
+        // skip A. The guard must keep both out.
+        assertEqual(1, received.length);
 
-      await waitUntil(() => received.length === 2, {
-        timeoutMs: 5000,
-        message:
-          'both messages should be read once the in-flight transaction commits',
-      });
-      assertEqual('A,C', received.join(','));
-    } finally {
-      await stop();
-    }
-  });
+        await transactionA.commit();
+
+        await waitUntil(() => received.length === 3, {
+          timeoutMs: 5000,
+          message:
+            'both messages should be read once the in-flight transaction commits',
+        });
+        assertEqual('S,A,C', received.join(','));
+      } finally {
+        await stop();
+      }
+    },
+  );
 });

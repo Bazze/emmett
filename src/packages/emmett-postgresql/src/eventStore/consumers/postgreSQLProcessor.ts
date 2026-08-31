@@ -44,6 +44,7 @@ import {
   readProcessorCheckpoint,
   storeProcessorCheckpoint,
   type EventStoreSchemaMigrationOptions,
+  type PostgreSQLProcessorCheckpoint,
 } from '../schema';
 import type { PostgreSQLEventStoreMessageBatchPullerStartFrom } from './messageBatchProcessing';
 
@@ -59,10 +60,6 @@ export type PostgreSQLProcessorHandlerContext = {
 } &
   // TODO: Reconsider if it should be for all processors
   EventStoreSchemaMigrationOptions;
-
-// Serialized 'transactionId:globalPosition' pair, opaque to the core processor, which
-// only ever compares checkpoints. See readMessagesBatch for why the pair is needed.
-export type PostgreSQLProcessorCheckpoint = string;
 
 export type PostgreSQLProcessor<MessageType extends Message = AnyMessage> =
   MessageProcessor<
@@ -168,7 +165,6 @@ export const postgreSQLCheckpointer = <
     return { lastCheckpoint: result?.lastProcessedCheckpoint };
   },
   store: async (options, context) => {
-    // The message metadata carries the serialized 'transactionId:globalPosition' pair.
     const newPosition: PostgreSQLProcessorCheckpoint | null = getCheckpoint(
       options.message,
     );

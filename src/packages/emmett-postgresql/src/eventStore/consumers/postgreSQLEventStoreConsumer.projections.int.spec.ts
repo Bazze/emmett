@@ -18,7 +18,7 @@ import {
   type PostgresEventStore,
 } from '../postgreSQLEventStore';
 import { pongoSingleStreamProjection } from '../projections';
-import { checkpointForGlobalPosition } from '../schema';
+import { checkpointAtGlobalPosition } from '../../testing/checkpoints';
 import { postgreSQLEventStoreConsumer } from './postgreSQLEventStoreConsumer';
 import type { PostgreSQLProjectorOptions } from './postgreSQLProcessor';
 import { getPostgreSQLStartedContainer } from '@event-driven-io/emmett-testcontainers';
@@ -193,7 +193,7 @@ void describe('PostgreSQL event store started consumer', () => {
           processorId: uuid(),
           projection: shoppingCartsSummaryProjection,
           startFrom: {
-            lastCheckpoint: await checkpointForGlobalPosition(
+            lastCheckpoint: await checkpointAtGlobalPosition(
               pool.execute,
               startPosition,
             ),

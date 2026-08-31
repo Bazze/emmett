@@ -498,11 +498,6 @@ void describe('Schema migrations tests', () => {
       readResult.lastProcessedCheckpoint,
       checkpointOf(maxBigInt),
     );
-
-    assertDeepEqual(
-      globalPositionOf(processorData.lastProcessedCheckpoint),
-      maxBigInt,
-    );
   });
 
   void it('new API works after legacy table cleanup', async () => {

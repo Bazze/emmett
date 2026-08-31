@@ -7,8 +7,11 @@ import {
 import { assertDeepEqual, assertIsNotNull } from '@event-driven-io/emmett';
 import { type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { after, before, describe, it } from 'node:test';
-import { createEventStoreSchema, defaultTag } from '.';
-import { PostgreSQLEventStoreCheckpoint } from './readMessagesBatch';
+import { createEventStoreSchema, defaultTag, messagesTable } from '.';
+import {
+  PostgreSQLEventStoreCheckpoint,
+  readMessagesBatch,
+} from './readMessagesBatch';
 import { readProcessorCheckpoint } from './readProcessorCheckpoint';
 import { storeProcessorCheckpoint } from './storeProcessorCheckpoint';
 import { getPostgreSQLStartedContainer } from '@event-driven-io/emmett-testcontainers';
@@ -281,6 +284,50 @@ void describe('storeProcessorCheckpoint and readProcessorCheckpoint tests', () =
     assertDeepEqual(result, {
       lastProcessedCheckpoint: checkpointOf(position2, transactionId),
     });
+  });
+
+  // Resolution has to come from the row at exactly that position. Ordering is by
+  // (transaction_id, global_position), so the row below it can hold a HIGHER transaction
+  // id; resuming from that neighbour's pair would leave it below the cursor and lose it.
+  // Resolution has to come from the row at exactly that position. Ordering is by
+  // (transaction_id, global_position), so the row below it can hold a HIGHER transaction
+  // id; resuming from that neighbour's pair would leave it below the cursor and lose it.
+  void it('does not resume past a message when the checkpointed row is gone', async () => {
+    const processorId = 'processor-read-legacy-pruned';
+    const checkpointPosition = 900n;
+    const survivorPosition = 899n;
+
+    // The survivor takes its transaction id second, so it is higher than the
+    // checkpointed row's while its global position is lower.
+    const checkpointTransactionId = await appendMessage(checkpointPosition);
+    const survivorTransactionId = await appendMessage(survivorPosition);
+    assertDeepEqual(survivorTransactionId > checkpointTransactionId, true);
+
+    await pool.execute.command(
+      sql(
+        `DELETE FROM ${messagesTable.name} WHERE global_position = %s::bigint`,
+        checkpointPosition,
+      ),
+    );
+
+    await storeLegacyCheckpoint(processorId, checkpointPosition);
+
+    const { lastProcessedCheckpoint } = await readProcessorCheckpoint(
+      pool.execute,
+      { processorId },
+    );
+
+    const { messages } = await readMessagesBatch(pool.execute, {
+      after: PostgreSQLEventStoreCheckpoint.parse(lastProcessedCheckpoint),
+      batchSize: 100,
+    });
+
+    assertDeepEqual(
+      messages.some(
+        (message) => message.metadata.globalPosition === survivorPosition,
+      ),
+      true,
+    );
   });
 
   void it('can update when the stored checkpoint is a bare global position', async () => {

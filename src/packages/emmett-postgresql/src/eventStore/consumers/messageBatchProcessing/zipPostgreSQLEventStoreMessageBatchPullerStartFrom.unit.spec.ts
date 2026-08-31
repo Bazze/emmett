@@ -5,10 +5,6 @@ import {
   type PostgreSQLEventStoreMessageBatchPullerStartFrom,
 } from '.';
 
-// One puller feeds every processor in a consumer, so it has to start from the earliest
-// position any of them holds. Starting later leaves the lagging processor's messages
-// undelivered, and its checkpoint then jumps over them.
-
 const checkpoint = (
   transactionId: bigint,
   globalPosition: bigint,

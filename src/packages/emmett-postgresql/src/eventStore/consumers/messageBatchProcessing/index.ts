@@ -175,10 +175,7 @@ const compareStartFrom = (
 
 // One puller feeds every processor, so it has to start from the earliest position any of
 // them holds; a processor that gets nothing before the shared cursor never sees those
-// messages and checkpoints past them. Taking the minimum of that ordering covers what
-// used to be three separate branches, and fixes the last of them: it sorted the position
-// objects rather than the checkpoints inside them, and `{} > {}` stringifies both to
-// '[object Object]', so the comparator was constant and the pick arbitrary.
+// messages and checkpoints past them.
 export const zipPostgreSQLEventStoreMessageBatchPullerStartFrom = (
   options: (PostgreSQLEventStoreMessageBatchPullerStartFrom | undefined)[],
 ): PostgreSQLEventStoreMessageBatchPullerStartFrom => {

@@ -16,10 +16,10 @@ import {
 } from '../postgreSQLEventStore';
 import { postgreSQLProcessorLock } from '../projections';
 import {
-  checkpointForGlobalPosition,
   PostgreSQLEventStoreCheckpoint,
   storeProcessorCheckpoint,
 } from '../schema';
+import { checkpointAtGlobalPosition } from '../../testing/checkpoints';
 import { postgreSQLEventStoreConsumer } from './postgreSQLEventStoreConsumer';
 import type { PostgreSQLReactorOptions } from './postgreSQLProcessor';
 
@@ -177,7 +177,7 @@ void describe('PostgreSQL event store started consumer', () => {
         consumer.reactor<GuestStayEvent>({
           processorId: uuid(),
           startFrom: {
-            lastCheckpoint: await checkpointForGlobalPosition(
+            lastCheckpoint: await checkpointAtGlobalPosition(
               pool.execute,
               startPosition,
             ),
@@ -523,7 +523,7 @@ void describe('PostgreSQL event store started consumer', () => {
         await storeProcessorCheckpoint(pool.execute, {
           processorId,
           version: 1,
-          newCheckpoint: await checkpointForGlobalPosition(
+          newCheckpoint: await checkpointAtGlobalPosition(
             pool.execute,
             firstPosition,
           ),
@@ -781,7 +781,7 @@ void describe('PostgreSQL event store started consumer', () => {
         await storeProcessorCheckpoint(pool.execute, {
           processorId,
           version: 1,
-          newCheckpoint: await checkpointForGlobalPosition(
+          newCheckpoint: await checkpointAtGlobalPosition(
             pool.execute,
             firstPosition,
           ),

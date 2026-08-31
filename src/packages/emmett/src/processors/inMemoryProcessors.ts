@@ -4,6 +4,7 @@ import {
   type AnyEvent,
   type AnyMessage,
   type BatchRecordedMessageHandlerWithContext,
+  type GlobalPositionTypeOfRecordedMessageMetadata,
   type MessageHandlerResult,
   type ReadEventMetadataWithGlobalPosition,
   type SingleRecordedMessageHandlerWithContext,
@@ -23,13 +24,19 @@ export type InMemoryProcessorHandlerContext = {
   database: InMemoryDatabase;
 };
 
-export type InMemoryProcessor<MessageType extends AnyMessage = AnyMessage> =
-  MessageProcessor<
-    MessageType,
-    // TODO: generalize this to support other metadata types
-    ReadEventMetadataWithGlobalPosition,
-    InMemoryProcessorHandlerContext
-  > & { database: InMemoryDatabase };
+export type InMemoryProcessor<
+  MessageType extends AnyMessage = AnyMessage,
+  // An in-memory processor can be driven by another store's consumer, which checkpoints
+  // in its own format, so the type is a parameter rather than this store's default.
+  CheckpointType =
+    GlobalPositionTypeOfRecordedMessageMetadata<ReadEventMetadataWithGlobalPosition>,
+> = MessageProcessor<
+  MessageType,
+  // TODO: generalize this to support other metadata types
+  ReadEventMetadataWithGlobalPosition,
+  InMemoryProcessorHandlerContext,
+  CheckpointType
+> & { database: InMemoryDatabase };
 
 export type InMemoryProcessorEachMessageHandler<
   MessageType extends AnyMessage = AnyMessage,
@@ -51,25 +58,33 @@ export type InMemoryProcessorConnectionOptions = {
   database?: InMemoryDatabase;
 };
 
-type CheckpointDocument = {
+type CheckpointDocument<CheckpointType> = {
   _id: string;
-  lastCheckpoint: bigint | null;
+  lastCheckpoint: CheckpointType | null;
 };
 
-export type InMemoryCheckpointer<MessageType extends AnyMessage = AnyMessage> =
-  Checkpointer<
-    MessageType,
-    ReadEventMetadataWithGlobalPosition,
-    InMemoryProcessorHandlerContext
-  >;
+export type InMemoryCheckpointer<
+  MessageType extends AnyMessage = AnyMessage,
+  CheckpointType =
+    GlobalPositionTypeOfRecordedMessageMetadata<ReadEventMetadataWithGlobalPosition>,
+> = Checkpointer<
+  MessageType,
+  ReadEventMetadataWithGlobalPosition,
+  InMemoryProcessorHandlerContext,
+  CheckpointType
+>;
 
 export const inMemoryCheckpointer = <
   MessageType extends AnyMessage = AnyMessage,
->(): InMemoryCheckpointer<MessageType> => {
+  CheckpointType =
+    GlobalPositionTypeOfRecordedMessageMetadata<ReadEventMetadataWithGlobalPosition>,
+>(): InMemoryCheckpointer<MessageType, CheckpointType> => {
   return {
     read: async ({ processorId }, { database }) => {
       const checkpoint = await database
-        .collection<CheckpointDocument>('emt_processor_checkpoints')
+        .collection<
+          CheckpointDocument<CheckpointType>
+        >('emt_processor_checkpoints')
         .findOne((d) => d._id === processorId);
 
       return Promise.resolve({
@@ -78,9 +93,9 @@ export const inMemoryCheckpointer = <
     },
     store: async (context, { database }) => {
       const { message, processorId, lastCheckpoint } = context;
-      const checkpoints = database.collection<CheckpointDocument>(
-        'emt_processor_checkpoints',
-      );
+      const checkpoints = database.collection<
+        CheckpointDocument<CheckpointType>
+      >('emt_processor_checkpoints');
 
       const checkpoint = await checkpoints.findOne(
         (d) => d._id === processorId,
@@ -88,7 +103,7 @@ export const inMemoryCheckpointer = <
 
       const currentPosition = checkpoint?.lastCheckpoint ?? null;
 
-      const newCheckpoint: bigint | null = getCheckpoint(message);
+      const newCheckpoint: CheckpointType | null = getCheckpoint(message);
 
       if (
         currentPosition &&
@@ -100,7 +115,9 @@ export const inMemoryCheckpointer = <
           reason:
             currentPosition === newCheckpoint
               ? 'IGNORED'
-              : newCheckpoint !== null && currentPosition > newCheckpoint
+              : newCheckpoint !== null &&
+                  newCheckpoint !== undefined &&
+                  currentPosition > newCheckpoint
                 ? 'CURRENT_AHEAD'
                 : 'MISMATCH',
         };
@@ -123,20 +140,27 @@ type InMemoryConnectionOptions = {
 
 export type InMemoryReactorOptions<
   MessageType extends AnyMessage = AnyMessage,
+  CheckpointType =
+    GlobalPositionTypeOfRecordedMessageMetadata<ReadEventMetadataWithGlobalPosition>,
 > = ReactorOptions<
   MessageType,
   ReadEventMetadataWithGlobalPosition,
-  InMemoryProcessorHandlerContext
+  InMemoryProcessorHandlerContext,
+  CheckpointType
 > &
   InMemoryConnectionOptions;
 
-export type InMemoryProjectorOptions<EventType extends AnyEvent = AnyEvent> =
-  ProjectorOptions<
-    EventType,
-    ReadEventMetadataWithGlobalPosition,
-    InMemoryProcessorHandlerContext
-  > &
-    InMemoryConnectionOptions;
+export type InMemoryProjectorOptions<
+  EventType extends AnyEvent = AnyEvent,
+  CheckpointType =
+    GlobalPositionTypeOfRecordedMessageMetadata<ReadEventMetadataWithGlobalPosition>,
+> = ProjectorOptions<
+  EventType,
+  ReadEventMetadataWithGlobalPosition,
+  InMemoryProcessorHandlerContext,
+  CheckpointType
+> &
+  InMemoryConnectionOptions;
 
 export type InMemoryProcessorOptions<
   MessageType extends AnyMessage = AnyMessage,
@@ -171,9 +195,13 @@ const inMemoryProcessingScope = (options: {
   return processingScope;
 };
 
-export const inMemoryProjector = <EventType extends AnyEvent = AnyEvent>(
-  options: InMemoryProjectorOptions<EventType>,
-): InMemoryProcessor<EventType> => {
+export const inMemoryProjector = <
+  EventType extends AnyEvent = AnyEvent,
+  CheckpointType =
+    GlobalPositionTypeOfRecordedMessageMetadata<ReadEventMetadataWithGlobalPosition>,
+>(
+  options: InMemoryProjectorOptions<EventType, CheckpointType>,
+): InMemoryProcessor<EventType, CheckpointType> => {
   const database = options.connectionOptions?.database ?? getInMemoryDatabase();
 
   const hooks = {
@@ -189,7 +217,8 @@ export const inMemoryProjector = <EventType extends AnyEvent = AnyEvent>(
   const processor = projector<
     EventType,
     ReadEventMetadataWithGlobalPosition,
-    InMemoryProcessorHandlerContext
+    InMemoryProcessorHandlerContext,
+    CheckpointType
   >({
     ...options,
     hooks,
@@ -198,15 +227,19 @@ export const inMemoryProjector = <EventType extends AnyEvent = AnyEvent>(
       processorId:
         options.processorId ?? `projection:${options.projection.name}`,
     }),
-    checkpoints: inMemoryCheckpointer<EventType>(),
+    checkpoints: inMemoryCheckpointer<EventType, CheckpointType>(),
   });
 
   return Object.assign(processor, { database });
 };
 
-export const inMemoryReactor = <MessageType extends AnyMessage = AnyMessage>(
-  options: InMemoryReactorOptions<MessageType>,
-): InMemoryProcessor<MessageType> => {
+export const inMemoryReactor = <
+  MessageType extends AnyMessage = AnyMessage,
+  CheckpointType =
+    GlobalPositionTypeOfRecordedMessageMetadata<ReadEventMetadataWithGlobalPosition>,
+>(
+  options: InMemoryReactorOptions<MessageType, CheckpointType>,
+): InMemoryProcessor<MessageType, CheckpointType> => {
   const database = options.connectionOptions?.database ?? getInMemoryDatabase();
 
   const hooks = {
@@ -215,14 +248,19 @@ export const inMemoryReactor = <MessageType extends AnyMessage = AnyMessage>(
     onClose: options.hooks?.onClose,
   };
 
-  const processor = reactor({
+  const processor = reactor<
+    MessageType,
+    ReadEventMetadataWithGlobalPosition,
+    InMemoryProcessorHandlerContext,
+    CheckpointType
+  >({
     ...options,
     hooks,
     processingScope: inMemoryProcessingScope({
       database,
       processorId: options.processorId,
     }),
-    checkpoints: inMemoryCheckpointer<MessageType>(),
+    checkpoints: inMemoryCheckpointer<MessageType, CheckpointType>(),
   });
 
   return Object.assign(processor, { database });

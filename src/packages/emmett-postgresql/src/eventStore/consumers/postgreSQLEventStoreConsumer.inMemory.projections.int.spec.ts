@@ -18,7 +18,8 @@ import {
   getPostgreSQLEventStore,
   type PostgresEventStore,
 } from '../postgreSQLEventStore';
-import { checkpointForGlobalPosition } from '../schema';
+import { checkpointAtGlobalPosition } from '../../testing/checkpoints';
+import type { PostgreSQLProcessorCheckpoint } from '../schema';
 import { postgreSQLEventStoreConsumer } from './postgreSQLEventStoreConsumer';
 import { getPostgreSQLStartedContainer } from '@event-driven-io/emmett-testcontainers';
 
@@ -192,19 +193,19 @@ void describe('PostgreSQL event store started consumer', () => {
 
         let stopAfterPosition: bigint | undefined = undefined;
 
-        const inMemoryProcessor = inMemoryProjector<ShoppingCartSummaryEvent>({
+        // Driven by a PostgreSQL consumer, so it checkpoints in PostgreSQL's format.
+        const inMemoryProcessor = inMemoryProjector<
+          ShoppingCartSummaryEvent,
+          PostgreSQLProcessorCheckpoint
+        >({
           processorId: uuid(),
           projection: shoppingCartsSummaryProjection,
           connectionOptions: { database },
           startFrom: {
-            // An in-memory processor fed by a PostgreSQL consumer sees PostgreSQL
-            // checkpoints. It only ever compares them, and the padded pair compares as
-            // text exactly as it does as a pair, so the mismatch is confined to the
-            // declared type: InMemoryProjectorOptions still says bigint.
-            lastCheckpoint: (await checkpointForGlobalPosition(
+            lastCheckpoint: await checkpointAtGlobalPosition(
               pool.execute,
               startPosition,
-            )) as unknown as bigint,
+            ),
           },
           stopAfter: (event) =>
             event.metadata.globalPosition === stopAfterPosition,

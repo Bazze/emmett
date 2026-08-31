@@ -1,4 +1,5 @@
 import { single, sql, type SQLExecutor } from '@event-driven-io/dumbo';
+import type { PostgreSQLProcessorCheckpoint } from './readMessagesBatch';
 import { createFunctionIfDoesNotExistSQL } from './createFunctionIfDoesNotExist';
 import { defaultTag, processorsTable, unknownTag } from './typing';
 
@@ -136,7 +137,8 @@ export const callStoreProcessorCheckpoint = (
 // migration taught store_processor_checkpoint to match a stored value in either format,
 // so no schema change is needed to start writing the pair.
 export type StoreLastProcessedProcessorPositionResult<
-  Position extends string | null = string,
+  Position extends PostgreSQLProcessorCheckpoint | null =
+    PostgreSQLProcessorCheckpoint,
 > =
   | {
       success: true;
@@ -144,19 +146,25 @@ export type StoreLastProcessedProcessorPositionResult<
     }
   | { success: false; reason: 'IGNORED' | 'MISMATCH' | 'CURRENT_AHEAD' };
 
-export const storeProcessorCheckpoint = async <Position extends string | null>(
+export const storeProcessorCheckpoint = async <
+  Position extends PostgreSQLProcessorCheckpoint | null,
+>(
   execute: SQLExecutor,
   options: {
     processorId: string;
     version: number | undefined;
-    newCheckpoint: null extends Position ? string | null : string;
-    lastProcessedCheckpoint: string | null;
+    newCheckpoint: null extends Position
+      ? PostgreSQLProcessorCheckpoint | null
+      : PostgreSQLProcessorCheckpoint;
+    lastProcessedCheckpoint: PostgreSQLProcessorCheckpoint | null;
     partition?: string;
     processorInstanceId?: string;
   },
 ): Promise<
   StoreLastProcessedProcessorPositionResult<
-    null extends Position ? string | null : string
+    null extends Position
+      ? PostgreSQLProcessorCheckpoint | null
+      : PostgreSQLProcessorCheckpoint
   >
 > => {
   try {

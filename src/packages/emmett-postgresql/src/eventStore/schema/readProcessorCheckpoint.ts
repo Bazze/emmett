@@ -1,5 +1,8 @@
 import { singleOrNull, sql, type SQLExecutor } from '@event-driven-io/dumbo';
-import { PostgreSQLEventStoreCheckpoint } from './readMessagesBatch';
+import {
+  PostgreSQLEventStoreCheckpoint,
+  type PostgreSQLProcessorCheckpoint,
+} from './readMessagesBatch';
 import { defaultTag, messagesTable, processorsTable } from './typing';
 
 type ReadProcessorCheckpointSqlResult = {
@@ -11,7 +14,7 @@ type ReadTransactionIdSqlResult = {
 };
 
 export type ReadProcessorCheckpointResult = {
-  lastProcessedCheckpoint: string | null;
+  lastProcessedCheckpoint: PostgreSQLProcessorCheckpoint | null;
 };
 
 // A checkpoint stored before this fix is a bare global position, with no transaction id
@@ -20,14 +23,18 @@ export type ReadProcessorCheckpointResult = {
 // in flight. The message the checkpoint points at carries the transaction id that was
 // actually reached, so read it back off the row.
 //
-// Note that emt_processors.last_processed_transaction_id is *not* that transaction id:
-// store_processor_checkpoint fills it with pg_current_xact_id(), the transaction that
-// wrote the checkpoint, not the one that wrote the message.
+// This resumes a processor that was mid-stream at upgrade. It does NOT recover messages
+// 0.42 already dropped below its cursor: those sit below the resolved pair too, and need
+// a manual backfill.
+//
+// Note that emt_processors.last_processed_transaction_id is *not* the transaction id we
+// need: store_processor_checkpoint fills it with pg_current_xact_id(), the transaction
+// that wrote the checkpoint, not the one that wrote the message.
 const resolveCheckpoint = async (
   execute: SQLExecutor,
   rawCheckpoint: string,
   partition: string,
-): Promise<string> => {
+): Promise<PostgreSQLProcessorCheckpoint> => {
   if (rawCheckpoint.includes(':')) return rawCheckpoint;
 
   const globalPosition = BigInt(rawCheckpoint);
@@ -37,41 +44,32 @@ const resolveCheckpoint = async (
       PostgreSQLEventStoreCheckpoint.default,
     );
 
-  // `<=` rather than `=` so an archived or pruned message falls back to the closest
-  // row below it. That can re-deliver a handful of messages, which processors already
-  // have to tolerate, where an exact match would throw.
+  // Only the row at exactly this position carries the transaction id that was reached.
+  // A neighbouring row's is not a substitute: order is by (transaction_id,
+  // global_position), so the row below this one can hold a *higher* transaction id, and
+  // resuming from that pair would skip it - reintroducing the loss this cursor exists to
+  // prevent. 0.43 throws when the row is gone; falling back to transaction id 0 keeps a
+  // pruned checkpoint startable instead.
   const result = await singleOrNull(
     execute.query<ReadTransactionIdSqlResult>(
       sql(
         `SELECT transaction_id
            FROM ${messagesTable.name}
-           WHERE partition = %L AND global_position <= %s
-           ORDER BY global_position DESC
-           LIMIT 1`,
+           WHERE partition = %L AND global_position = %s::bigint`,
         partition,
         globalPosition,
       ),
     ),
   );
 
+  // No transaction id is ever 0, so (0, globalPosition) sits below every real row: it can
+  // only replay, never skip. Keeping the position means the checkpoint still matches the
+  // stored value when the processor next writes one.
   return PostgreSQLEventStoreCheckpoint.toProcessorCheckpoint({
     transactionId: result !== null ? BigInt(result.transaction_id) : 0n,
     globalPosition,
   });
 };
-
-// Turns a bare global position into a resumable checkpoint. Useful when upgrading a
-// deployment by hand, or wherever only a global position is known.
-export const checkpointForGlobalPosition = (
-  execute: SQLExecutor,
-  globalPosition: bigint,
-  options?: { partition?: string },
-): Promise<string> =>
-  resolveCheckpoint(
-    execute,
-    globalPosition.toString(),
-    options?.partition ?? defaultTag,
-  );
 
 export const readProcessorCheckpoint = async (
   execute: SQLExecutor,
