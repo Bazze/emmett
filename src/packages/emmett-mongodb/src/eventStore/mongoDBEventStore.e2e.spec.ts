@@ -6,6 +6,7 @@ import {
 import {
   assertDeepEqual,
   assertEqual,
+  assertFalse,
   assertIsNotNull,
   assertTrue,
   EmmettAttributes,
@@ -123,6 +124,47 @@ void describe('MongoDBEventStore', () => {
     );
     assertIsNotNull(stream);
     assertEqual(3n, stream.metadata.streamPosition);
+  });
+
+  void it('should store stream metadata on creation and ignore it on later appends', async () => {
+    const productItem: PricedProductItem = {
+      productId: '123',
+      quantity: 10,
+      price: 3,
+    };
+    const streamName = toStreamName('shopping_cart', uuid());
+
+    await eventStore.appendToStream<ShoppingCartEvent>(
+      streamName,
+      [{ type: 'ProductItemAdded', data: { productItem } }],
+      { streamMetadata: { tenantId: 'tenant-1' } },
+    );
+    await eventStore.appendToStream<ShoppingCartEvent>(
+      streamName,
+      [{ type: 'ProductItemAdded', data: { productItem } }],
+      { streamMetadata: { tenantId: 'tenant-2' } },
+    );
+
+    const stream = await collection.findOne({ streamName });
+    assertIsNotNull(stream);
+    assertDeepEqual(stream.streamMetadata, { tenantId: 'tenant-1' });
+  });
+
+  void it('should store no stream metadata when none is passed', async () => {
+    const productItem: PricedProductItem = {
+      productId: '123',
+      quantity: 10,
+      price: 3,
+    };
+    const streamName = toStreamName('shopping_cart', uuid());
+
+    await eventStore.appendToStream<ShoppingCartEvent>(streamName, [
+      { type: 'ProductItemAdded', data: { productItem } },
+    ]);
+
+    const stream = await collection.findOne({ streamName });
+    assertIsNotNull(stream);
+    assertFalse('streamMetadata' in stream);
   });
 
   void it('should record observability while appending', async () => {

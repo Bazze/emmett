@@ -374,6 +374,9 @@ const toAppendOptions = <
     ...(options.expectedStreamVersion !== undefined
       ? { expectedStreamVersion: options.expectedStreamVersion }
       : {}),
+    ...(options.streamMetadata
+      ? { streamMetadata: options.streamMetadata }
+      : {}),
     ...(options.schema
       ? {
           schema: options.schema as AppendToStreamOptions<

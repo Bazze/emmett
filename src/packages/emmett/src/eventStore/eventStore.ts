@@ -227,6 +227,11 @@ export type AppendToStreamOptions<
   EventPayloadType extends Event = EventType,
 > = {
   expectedStreamVersion?: ExpectedStreamVersion;
+  /**
+   * Metadata stored on the stream when this append creates it.
+   * Ignored when the stream already exists.
+   */
+  streamMetadata?: DefaultRecord;
   schema?: EventStoreAppendSchemaOptions<EventType, EventPayloadType> &
     JSONSerializationOptions;
   observability?: OperationObservabilityOptions;

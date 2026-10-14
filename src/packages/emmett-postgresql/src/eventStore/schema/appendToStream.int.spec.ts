@@ -1,12 +1,14 @@
-import { dumbo, SQL } from '@event-driven-io/dumbo';
+import { dumbo, single, SQL } from '@event-driven-io/dumbo';
 import { pgDumboDriver, type PgPool } from '@event-driven-io/dumbo/pg';
 import {
+  assertDeepEqual,
   assertEqual,
   assertFalse,
   assertIsNotNull,
   assertOk,
   assertThatArray,
   assertTrue,
+  type DefaultRecord,
   type Event,
   type RecordedMessage,
 } from '@event-driven-io/emmett';
@@ -358,4 +360,35 @@ void describe('appendEvent', () => {
 
     assertFalse(result.success);
   });
+
+  void it('should store stream metadata on creation and ignore it on later appends', async () => {
+    // Given
+    const streamId = uuid();
+    await pool.withConnection(async (connection) =>
+      appendToStream(connection, streamId, 'shopping_cart', events, {
+        streamMetadata: { tenantId: 'tenant-1' },
+      }),
+    );
+
+    // When
+    await pool.withConnection(async (connection) =>
+      appendToStream(connection, streamId, 'shopping_cart', events, {
+        streamMetadata: { tenantId: 'tenant-2' },
+      }),
+    );
+
+    // Then
+    assertDeepEqual(await readStreamMetadata(streamId), {
+      tenantId: 'tenant-1',
+    });
+  });
+
+  const readStreamMetadata = async (streamId: string) => {
+    const { stream_metadata } = await single(
+      pool.execute.query<{ stream_metadata: DefaultRecord }>(
+        SQL`SELECT stream_metadata FROM emt_streams WHERE stream_id = ${streamId}`,
+      ),
+    );
+    return stream_metadata;
+  };
 });

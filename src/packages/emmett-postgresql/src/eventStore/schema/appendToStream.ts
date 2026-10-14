@@ -41,7 +41,8 @@ export const appendToStreamSQLFor = (databaseSchemaName?: string) =>
       v_stream_id text,
       v_stream_type text,
       v_expected_stream_position bigint DEFAULT NULL,
-      v_partition text DEFAULT ${postgreSQLFunctionName(databaseSchemaName, 'emt_sanitize_name')}('default_partition')
+      v_partition text DEFAULT ${postgreSQLFunctionName(databaseSchemaName, 'emt_sanitize_name')}('default_partition'),
+      v_stream_metadata jsonb DEFAULT '{}'::jsonb
   ) RETURNS TABLE (
       success boolean,
       next_stream_position bigint,
@@ -76,7 +77,7 @@ export const appendToStreamSQLFor = (databaseSchemaName?: string) =>
           INSERT INTO ${tableReference(databaseSchemaName, streamsTable.name)}
               (stream_id, stream_position, partition, stream_type, stream_metadata, is_archived)
           VALUES
-              (v_stream_id, v_next_stream_position, v_partition, v_stream_type, '{}', FALSE);
+              (v_stream_id, v_next_stream_position, v_partition, v_stream_type, v_stream_metadata, FALSE);
       ELSE
           UPDATE ${tableReference(databaseSchemaName, streamsTable.name)} as s              
           SET stream_position = v_next_stream_position
@@ -139,6 +140,7 @@ type CallAppendToStreamParams = {
   streamType: string;
   expectedStreamPosition: bigint | null;
   partition: string;
+  streamMetadata?: DefaultRecord;
 };
 
 // TODO: check if we need all those casts
@@ -154,6 +156,7 @@ export const callAppendToStream = (params: CallAppendToStreamParams) =>
       ${params.streamType}::text,
       ${params.expectedStreamPosition},
       ${params.partition}::text
+      ${params.streamMetadata ? SQL`, ${params.streamMetadata}::jsonb` : SQL.EMPTY}
     )`;
 
 type AppendToStreamResult =
@@ -225,6 +228,7 @@ export const appendToStream = (
         {
           expectedStreamVersion,
           databaseSchemaName: options?.databaseSchemaName,
+          streamMetadata: options?.streamMetadata,
         },
       );
 
@@ -327,6 +331,7 @@ export const appentToStreamRaw = (
     expectedStreamVersion: bigint | null;
     partition?: string;
     databaseSchemaName?: string;
+    streamMetadata?: DefaultRecord;
   },
 ): Promise<AppendToStreamSqlResult> =>
   single(
@@ -346,6 +351,7 @@ export const appentToStreamRaw = (
         streamType,
         expectedStreamPosition: options?.expectedStreamVersion ?? null,
         partition: options?.partition ?? defaultTag,
+        streamMetadata: options?.streamMetadata,
       }),
     ),
   );

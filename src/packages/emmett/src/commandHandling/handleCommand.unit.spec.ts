@@ -9,6 +9,7 @@ import {
   ExpectedVersionConflictError,
   getInMemoryEventStore,
   STREAM_DOES_NOT_EXIST,
+  type EventStore,
 } from '../eventStore';
 import {
   assertDeepEqual,
@@ -469,6 +470,33 @@ void describe('Command Handler', () => {
       `shopping_cart-${shoppingCartId}`,
     );
     assertThatArray(events).hasSize(1);
+  });
+
+  void it('passes the stream metadata to the append', async () => {
+    const appendedStreamMetadata: unknown[] = [];
+    const recordingEventStore: EventStore = {
+      ...eventStore,
+      appendToStream: (streamName, events, options) => {
+        appendedStreamMetadata.push(options?.streamMetadata);
+        return eventStore.appendToStream(streamName, events, options);
+      },
+    };
+
+    await handleCommand(
+      recordingEventStore,
+      randomUUID(),
+      (state) =>
+        addProductItem(
+          {
+            type: 'AddProductItem',
+            data: { productItem: { productId: '123', quantity: 1, price: 3 } },
+          },
+          state,
+        ),
+      { streamMetadata: { tenantId: 'tenant-1' } },
+    );
+
+    assertDeepEqual(appendedStreamMetadata, [{ tenantId: 'tenant-1' }]);
   });
 
   void it('awaits an async handler before appending', async () => {

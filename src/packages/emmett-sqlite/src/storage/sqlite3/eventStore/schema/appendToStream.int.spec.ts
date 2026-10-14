@@ -1,4 +1,9 @@
-import { JSONSerializer, SQL, type SQLExecutor } from '@event-driven-io/dumbo';
+import {
+  JSONSerializer,
+  single,
+  SQL,
+  type SQLExecutor,
+} from '@event-driven-io/dumbo';
 import {
   InMemorySQLiteDatabase,
   sqlite3Connection,
@@ -7,11 +12,13 @@ import {
   type Sqlite3Pool,
 } from '@event-driven-io/dumbo/sqlite3';
 import {
+  assertDeepEqual,
   assertEqual,
   assertFalse,
   assertIsNotNull,
   assertThrowsAsync,
   assertTrue,
+  type DefaultRecord,
   type Event,
   type RecordedMessage,
 } from '@event-driven-io/emmett';
@@ -331,4 +338,44 @@ void describe('appendEvent', () => {
 
     assertFalse(result.success);
   });
+
+  void it('should store stream metadata on creation and ignore it on later appends', async () => {
+    // Given
+    const streamId = uuid();
+    await appendToStream(connection, streamId, 'shopping_cart', events, {
+      streamMetadata: { tenantId: 'tenant-1' },
+    });
+
+    // When
+    await appendToStream(connection, streamId, 'shopping_cart', events, {
+      streamMetadata: { tenantId: 'tenant-2' },
+    });
+
+    // Then
+    assertDeepEqual(await readStreamMetadata(streamId), {
+      tenantId: 'tenant-1',
+    });
+  });
+
+  void it('should store empty stream metadata when none is passed', async () => {
+    // Given
+    const streamId = uuid();
+
+    // When
+    await appendToStream(connection, streamId, 'shopping_cart', events);
+
+    // Then
+    assertDeepEqual(await readStreamMetadata(streamId), {});
+  });
+
+  const readStreamMetadata = async (
+    streamId: string,
+  ): Promise<DefaultRecord> => {
+    const { stream_metadata } = await single(
+      execute.query<{ stream_metadata: string }>(
+        SQL`SELECT stream_metadata FROM emt_streams WHERE stream_id = ${streamId}`,
+      ),
+    );
+    return JSONSerializer.deserialize(stream_metadata);
+  };
 });

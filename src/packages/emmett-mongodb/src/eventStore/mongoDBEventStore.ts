@@ -16,6 +16,7 @@ import {
   type AppendToStreamResult,
   type Closeable,
   type DefaultEventStoreOptions,
+  type DefaultRecord,
   type Event,
   type EventStore,
   type EventStoreObservabilityConfig,
@@ -95,6 +96,7 @@ export interface EventStream<
     createdAt: Date;
     updatedAt: Date;
   };
+  streamMetadata?: DefaultRecord;
   projections: Record<string, MongoDBReadModel>;
 }
 
@@ -455,6 +457,9 @@ class MongoDBEventStoreImplementation implements MongoDBEventStore, Closeable {
             'metadata.streamId': streamId,
             'metadata.streamType': streamType,
             'metadata.createdAt': now,
+            ...(options?.streamMetadata
+              ? { streamMetadata: options.streamMetadata }
+              : {}),
           },
         };
 

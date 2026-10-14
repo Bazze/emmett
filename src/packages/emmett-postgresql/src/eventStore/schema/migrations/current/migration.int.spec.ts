@@ -13,6 +13,7 @@ import {
   assertThatArray,
   assertTrue,
   bigIntProcessorCheckpoint,
+  type DefaultRecord,
   type Event,
   type ReadEvent,
 } from '@event-driven-io/emmett';
@@ -40,6 +41,7 @@ import { migrations_0_36_0 } from '../0_36_0';
 import { migrations_0_38_7 } from '../0_38_7';
 import { migrations_0_42_0 } from '../0_42_0';
 import { migrations_0_43_0 } from '../0_43_0';
+import { migration_0_43_0_addStreamMetadataToAppend } from '../0_43_0/0_43_0.migration';
 import { pgEventStoreDriver } from '../../../../pg';
 
 export type ProductItemAdded = Event<
@@ -245,6 +247,36 @@ void describe('Schema migrations tests', () => {
 
     const result = await assertCanAppendAndRead(eventStore);
     await assertCanStoreAndReadCheckpoints(pool, result);
+  });
+
+  void it('lets appends set stream metadata after migrating from 0.43.0 beta schema', async () => {
+    // Given a database migrated by a 0.43.0 beta, before appends took stream metadata
+    await runSQLMigrations(pool, [
+      ...migrations_0_36_0,
+      ...migrations_0_38_7,
+      ...migrations_0_42_0,
+      ...migrations_0_43_0.filter(
+        (migration) => migration !== migration_0_43_0_addStreamMetadataToAppend,
+      ),
+      schemaMigration,
+    ]);
+
+    // When
+    const { applied } = await eventStore.schema.migrate();
+    await eventStore.appendToStream(
+      'shopping_cart-123',
+      [{ type: 'ShoppingCartConfirmed', data: { shoppingCartId: '123' } }],
+      { streamMetadata: { tenantId: 'tenant-1' } },
+    );
+
+    // Then
+    assertDeepEqual(applied, [migration_0_43_0_addStreamMetadataToAppend]);
+    const { rows } = await pool.execute.query<{
+      stream_metadata: DefaultRecord;
+    }>(
+      SQL`SELECT stream_metadata FROM emt_streams WHERE stream_id = 'shopping_cart-123'`,
+    );
+    assertDeepEqual(rows, [{ stream_metadata: { tenantId: 'tenant-1' } }]);
   });
 
   void it('migrates from 0.43.0 schema', async () => {

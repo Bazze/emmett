@@ -400,7 +400,8 @@ IF NOT EXISTS (
       v_expected_stream_position bigint DEFAULT NULL,
       v_partition text DEFAULT ",
         "emt_sanitize_name",
-        "('default_partition')
+        "('default_partition'),
+      v_stream_metadata jsonb DEFAULT '{}'::jsonb
   ) RETURNS TABLE (
       success boolean,
       next_stream_position bigint,
@@ -439,7 +440,7 @@ IF NOT EXISTS (
         "
               (stream_id, stream_position, partition, stream_type, stream_metadata, is_archived)
           VALUES
-              (v_stream_id, v_next_stream_position, v_partition, v_stream_type, '{}', FALSE);
+              (v_stream_id, v_next_stream_position, v_partition, v_stream_type, v_stream_metadata, FALSE);
       ELSE
           UPDATE ",
         "__P__",

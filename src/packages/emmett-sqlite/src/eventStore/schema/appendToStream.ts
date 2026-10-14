@@ -17,6 +17,7 @@ import {
   STREAM_EXISTS,
   type AppendToStreamOptions,
   type BeforeEventStoreCommitHandler,
+  type DefaultRecord,
   type ExpectedStreamVersion,
   type Event as Message,
   type ObservabilityContext,
@@ -109,6 +110,7 @@ export const appendToStream = async <MessageType extends Message>(
           {
             expectedStreamVersion,
             databaseSchemaName: options?.databaseSchemaName,
+            streamMetadata: options?.streamMetadata,
           },
         );
 
@@ -174,6 +176,7 @@ const appendToStreamRaw = async (
     expectedStreamVersion: bigint | null;
     partition?: string;
     databaseSchemaName?: string;
+    streamMetadata?: DefaultRecord;
   },
 ): Promise<AppendEventResult> => {
   let expectedStreamVersion = options?.expectedStreamVersion ?? null;
@@ -205,7 +208,7 @@ const appendToStreamRaw = async (
                 ${messages.length},
                 ${options?.partition ?? defaultTag},
                 ${streamType},
-                '[]',
+                ${options?.streamMetadata ?? {}},
                 false
             )
             RETURNING stream_position;

@@ -127,6 +127,18 @@ await eventStore.appendToStream('existing-stream', [event], {
 });
 ```
 
+#### Stream Metadata
+
+```typescript
+// Stored on the stream by the append that creates it
+await eventStore.appendToStream('shopping_cart-123', [firstEvent], {
+  streamMetadata: { tenantId: 'tenant-1' },
+});
+// Ignored when the stream already exists
+```
+
+PostgreSQL and SQLite store it in `emt_streams.stream_metadata`, MongoDB in the stream document's `streamMetadata`. The in-memory and EventStoreDB stores ignore it.
+
 ### aggregateStream
 
 Rebuilds state from events using an evolve function.
